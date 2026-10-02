@@ -12,8 +12,10 @@ def load_config(path=None):
 
     Adds these derived values:
       formation.k_spacing, formation.v_min, formation.v_max   (absolute, from the *_rel entries)
+      intercept.speed, target.speed                           (absolute, from the *_rel entries)
       sim.time_scale   how much slower/faster this setup is than the reference one
                        (scripts multiply their run times by it)
+      target.speed, mission.intercept_speed, mission.orbit_speed, mission.capture_radius
     """
     path = Path(path) if path is not None else DEFAULT_CONFIG
     with open(path, "r") as f:
@@ -24,6 +26,17 @@ def load_config(path=None):
     fm["v_min"] = fm["v_min_rel"] * v
     fm["v_max"] = fm["v_max_rel"] * v
     cfg["sim"]["time_scale"] = (fm["radius"] / v) / REFERENCE_R_OVER_V
+    if "target" in cfg:
+        cfg["target"]["speed"] = cfg["target"]["speed_rel"] * v
+    if "mission" in cfg:
+        ms = cfg["mission"]
+        ms["intercept_speed"] = ms["intercept_speed_rel"] * v
+        ms["orbit_speed"] = ms["orbit_speed_rel"] * v
+        ms["capture_radius"] = ms["orbit_radius"] + ms["capture_margin"]
+    if "intercept" in cfg:
+        cfg["intercept"]["speed"] = cfg["intercept"]["speed_rel"] * v
+    if "target" in cfg:
+        cfg["target"]["speed"] = cfg["target"]["speed_rel"] * v
     check_config(cfg)
     return cfg
 
@@ -46,5 +59,26 @@ def check_config(cfg):
     if fm["v_max"] / tightest > w_max:
         problems.append(f"the drone cannot turn tightly enough: v_max / radius = {fm['v_max'] / tightest:.2f} rad/s "
                         f"exceeds drone.omega_max = {w_max}. Lower the speed, enlarge the circle or raise omega_max.")
+    if "intercept" in cfg and "target" in cfg:
+        if cfg["intercept"]["speed_rel"] <= max(cfg["target"]["speed_rel"], cfg["target"]["evade_speed_rel"]):
+            problems.append("intercept.speed_rel must be larger than target.speed_rel, otherwise the target "
+                            "cannot be caught.")
+        if cfg["intercept"]["guidance"] not in ("lead", "pure"):
+            problems.append("intercept.guidance must be 'lead' or 'pure'.")
+    if "mission" in cfg and "target" in cfg:
+        ms, tspeed = cfg["mission"], cfg["target"]["speed"]
+        if tspeed >= 0.8 * ms["intercept_speed"]:
+            problems.append(f"the target ({tspeed:.2f} m/s) is too fast to catch: it must be slower than 80% of the "
+                            f"interceptor speed ({ms['intercept_speed']:.2f} m/s). Lower target.speed_rel.")
+        if ms["orbit_speed"] <= tspeed:
+            problems.append(f"mission.orbit_speed ({ms['orbit_speed']:.2f} m/s) must exceed the target speed "
+                            f"({tspeed:.2f} m/s), otherwise the drone cannot circle a moving target.")
+        need = (ms["orbit_speed"] + tspeed) / ms["orbit_radius"]
+        if need > w_max:
+            problems.append(f"the investigation circle is too tight: it needs about {need:.2f} rad/s but "
+                            f"drone.omega_max = {w_max}. Enlarge mission.orbit_radius or lower orbit_speed_rel.")
+        if "sensor" in cfg and ms["orbit_radius"] >= cfg["sensor"]["fov_radius"]:
+            problems.append("mission.orbit_radius must be smaller than sensor.fov_radius, or the interceptor "
+                            "loses sight of the target while circling it.")
     if problems:
         raise ValueError("configs problem:\n  - " + "\n  - ".join(problems))

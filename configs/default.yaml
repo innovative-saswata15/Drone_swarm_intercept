@@ -11,10 +11,10 @@ drone:
 
 arena:
   center: [0.0, 0.0]
-  half_size: 2.5    # arena is 4 m x 4 m
+  half_size: 2.0    # arena is 4 m x 4 m
 
 formation:
-  radius: 2.0       # formation circle radius [m]
+  radius: 1.2       # formation circle radius [m]
   k_gvf: 1.5        # GVF convergence gain [1/m]
   k_heading: 3.0    # heading loop gain [1/s]
   direction: 1      # +1 = counter-clockwise, -1 = clockwise
@@ -24,3 +24,47 @@ formation:
   v_min_rel: 0.625       # slowest allowed speed = v_min_rel * v
   v_max_rel: 1.375       # fastest allowed speed = v_max_rel * v
   hold_radius: 0.5  # small inner circle flown by a drone that has left the formation [m]
+
+target:
+  speed_rel: 0.4        # target speed as a fraction of drone.v (it must be slower than the drones)
+  start: [-1.7, -1.0]   # where the target enters [m]
+  heading_deg: 25.0     # its initial direction of travel
+  enter_time: 30.0      # in the mission simulation the target appears after this long [s]
+  evade_speed_rel: 0.9  # 'evasive' pattern only: speed while running away, as a fraction of drone.v
+  evade_radius: 0.9     # 'evasive' pattern only: it starts running when a drone is closer than this [m]
+
+sensor:                 # virtual downward-looking sensor carried by every drone
+  fov_radius: 0.6       # the target is seen only within this horizontal distance of a drone [m]
+  sigma: 0.03           # measurement noise, standard deviation per axis [m]
+  p_dropout: 0.1        # probability that a measurement is lost even when the target is in view
+  rate_hz: 10           # measurement rate
+  area:                 # wide-area detection of anything entering the protected zone (emulates the mocap room)
+    half_size: 1.5      # protected zone is a square of this half-size around the arena centre [m]
+    sigma: 0.10         # coarse: 10 cm noise per axis
+    p_dropout: 0.2
+    rate_hz: 5
+
+estimator:
+  sigma_accel: 0.2      # how hard the target is assumed to manoeuvre [m/s^2] (process noise)
+  lost_after: 5.0       # the track is declared lost after this long without a measurement [s]
+
+intercept:
+  speed_rel: 1.25       # interceptor speed as a fraction of drone.v (must be faster than the target)
+  capture_radius: 0.25  # the target counts as intercepted within this horizontal distance [m]
+  confirm_time: 1.0     # a track must be this old before a drone is sent [s]
+  guidance: lead        # lead = aim at the predicted meeting point, pure = aim at the target's current position
+
+mission:
+  intercept_speed_rel: 1.375  # the interceptor flies at this multiple of drone.v while chasing
+  orbit_radius: 0.4           # radius of the 'investigation' circle around the target [m]
+  orbit_speed_rel: 0.75       # speed around that circle, as a multiple of drone.v
+  capture_margin: 0.1         # 'intercepted' = within orbit_radius + capture_margin of the estimate [m]
+  investigate_time: 15.0      # how long the interceptor circles the target [s]
+  confirm_time: 1.0           # a track must be this old before a drone is sent [s]
+  rejoin_tolerance: 0.1       # returning drone counts as 'in formation' within this distance of the circle [m]
+  rejoin_clearance: 0.6       # ...and only when no formation drone is closer than this horizontally [m]
+
+altitude:                     # height layers keep the interceptor above the formation while it crosses
+  formation: 1.0              # [m]
+  transit: 1.5                # [m]
+  climb_rate: 0.5             # [m/s]
