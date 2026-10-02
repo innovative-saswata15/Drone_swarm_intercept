@@ -1,17 +1,19 @@
 """The complete classical mission: surveil -> detect -> select -> intercept -> investigate -> return."""
 import numpy as np
 from swarm_intercept.core.dynamics import unicycle_step, velocity
+from swarm_intercept.utils.angles import wrap
 from swarm_intercept.core.sensors import target_measurement, area_measurement
 from swarm_intercept.core.estimator import TargetKF
 from swarm_intercept.control.gvf import desired_heading
 from swarm_intercept.control.heading import heading_control
 from swarm_intercept.control.formation import phase_angles, spacing_speeds
 from swarm_intercept.control.guidance import orbit_velocity, follow_velocity, guidance_command
+from swarm_intercept.control.safety import safety_filter
 from swarm_intercept.mission.fsm import MissionFSM, SURVEIL, INTERCEPT, INVESTIGATE, RETURN
 from swarm_intercept.sim_track import make_target, DEFAULT_STARTS
 
 
-def drone_command(j, states, speeds, mode, kf, cfg, blocked=False):
+def drone_command(j, states, speeds, mode, kf, cfg, blocked=0):
     """Speed and turn-rate command for drone j in its current mission state. Returns (v, omega, e)."""
     dt = cfg["sim"]["dt"]
     f, ms = cfg["formation"], cfg["mission"]
@@ -35,13 +37,24 @@ def drone_command(j, states, speeds, mode, kf, cfg, blocked=False):
             return v, omega, e
 
     # SURVEIL and RETURN both follow the formation circle. A returning drone is not yet part of the
-    # spacing law; if it arrives right above a formation drone it slows down to let that drone pull ahead.
+    # spacing law. If it arrives next to a formation drone it opens a gap first: it speeds up when it is
+    # ahead of that drone (blocked = +1) and slows down when it is behind (blocked = -1).
     v = speeds[j]
-    if mode == RETURN and blocked:
-        v = f["v_min"]
+    if mode == RETURN and blocked != 0:
+        v = f["v_max"] if blocked > 0 else f["v_min"]      # pull ahead of, or drop behind, the nearby drone
     theta_d, omega_d, e = desired_heading(p, velocity(states[j], v), c, f["radius"], f["k_gvf"], f["direction"], dt)
     omega, _ = heading_control(theta, theta_d, omega_d, f["k_heading"])
     return v, omega, e
+
+
+def rejoin_block(j, states, mode, phis, fsm, cfg):
+    """For a returning drone: 0 = free to rejoin, +1 = a formation drone is close BEHIND it, -1 = close AHEAD."""
+    if mode[j] != RETURN or fsm.clear_to_rejoin(j, states):
+        return 0
+    others = [k for k in range(len(states)) if k != j and mode[k] == SURVEIL]
+    k = min(others, key=lambda m: np.linalg.norm(states[m, :2] - states[j, :2]))
+    lead = wrap(cfg["formation"]["direction"] * (phis[j] - phis[k]))     # > 0: drone j is ahead along the circle
+    return 1 if lead > 0 else -1
 
 
 def simulate_mission(cfg, pattern="weave", seed=None, T=150.0, states0=None):
@@ -63,11 +76,14 @@ def simulate_mission(cfg, pattern="weave", seed=None, T=150.0, states0=None):
     ar = sc["area"]
     every_area = max(1, int(round(1.0 / (ar["rate_hz"] * dt))))
     speeds_prev = np.full(N, cfg["drone"]["v"])
+    ms = cfg["mission"]
+    last_cmd = np.column_stack([speeds_prev, np.zeros(N)])      # (v, omega) each drone applied last step
 
     n = int(round(T / dt))
     log = {"t": np.arange(n) * dt}
     for key in ("x", "y", "theta", "z", "v", "omega", "e", "gap"):
         log[key] = np.zeros((n, N))
+    log["filtered"] = np.zeros((n, N), dtype=bool)
     log.update({"mode": np.zeros((n, N), dtype=int), "target": np.zeros((n, 4)),
                 "est": np.full((n, 4), np.nan), "tracked": np.zeros(n, dtype=bool),
                 "in_view": np.zeros(n, dtype=bool), "min_sep": np.zeros(n), "min_sep_xy": np.zeros(n),
@@ -112,14 +128,24 @@ def simulate_mission(cfg, pattern="weave", seed=None, T=150.0, states0=None):
         speeds, gap = spacing_speeds(phis, in_formation, cfg["drone"]["v"], f["k_spacing"],
                                      f["v_min"], f["v_max"], f["direction"])
         cmd = [drone_command(j, states, speeds_prev if mode[j] in (INTERCEPT, INVESTIGATE) else speeds,
-                             mode[j], kf, cfg, blocked=(mode[j] == RETURN and not fsm.clear_to_rejoin(j, states)))
+                             mode[j], kf, cfg, blocked=rejoin_block(j, states, mode, phis, fsm, cfg))
                for j in range(N)]
+        # --- safety filter: every drone checks its command against the others ---
+        applied = np.zeros((N, 2))
         for j in range(N):
             v, omega, e = cmd[j]
             omega = float(np.clip(omega, -omega_max, omega_max))
-            log["v"][i, j], log["omega"][i, j], log["e"][i, j] = v, omega, e
+            v_hi = max(f["v_max"], ms["intercept_speed"])
+            v, omega, changed = safety_filter(j, states, last_cmd, v, omega, cfg, v_hi,
+                                              priority=(mode != SURVEIL))     # formation drones have right of way
+            applied[j] = v, omega
+            log["v"][i, j], log["omega"][i, j], log["e"][i, j], log["filtered"][i, j] = v, omega, e, changed
+        for j in range(N):
+            v, omega = applied[j]
             states[j] = unicycle_step(states[j], v, omega, dt, omega_max)
             speeds_prev[j] = v
+        last_cmd = applied
+        for j in range(N):
             z_goal = al["formation"] if mode[j] == SURVEIL else al["transit"]
             z[j] += np.clip(z_goal - z[j], -al["climb_rate"] * dt, al["climb_rate"] * dt)
         log["gap"][i] = gap

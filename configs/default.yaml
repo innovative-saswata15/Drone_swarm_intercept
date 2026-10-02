@@ -56,9 +56,19 @@ mission:
   investigate_time: 15.0      # how long the interceptor circles the target [s]
   confirm_time: 1.0           # a track must be this old before a drone is sent [s]
   rejoin_tolerance: 0.1       # returning drone counts as 'in formation' within this distance of the circle [m]
-  rejoin_clearance: 0.6       # ...and only when no formation drone is closer than this horizontally [m]
+  rejoin_clearance: 0.8       # ...and only when no formation drone is closer than this horizontally [m]
 
 altitude:                     # height layers keep the interceptor above the formation while it crosses
   formation: 1.0              # [m]
   transit: 1.5                # [m]
   climb_rate: 0.5             # [m/s]
+
+safety:                       # collision-avoidance filter applied to every drone's command
+  enabled: true
+  d_safe: 0.5                 # two drones must never be closer than this HORIZONTALLY [m]
+  lookahead: 0.1              # the filter controls a point this far ahead of each drone [m]
+  alpha: 2.0                  # how late the filter may act: larger = later and sharper [1/s]
+  v_floor_rel: 0.1            # in an emergency a drone may slow to this fraction of drone.v
+  yield_margin: 0.15          # the drone that gives way keeps this much extra distance [m]
+  turn_cost_length: 0.1       # price of turning relative to braking: larger = prefer to slow down [m]
+  wall_margin: 0.25           # drones stay this far inside the arena walls [m]
