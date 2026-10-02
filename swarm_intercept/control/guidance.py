@@ -74,3 +74,63 @@ def follow_velocity(theta, u_now, u_next, dt, k_gamma, v_lo, v_hi):
     omega = omega_d + k_gamma * gamma
     speed = float(np.clip(np.linalg.norm(u_now), v_lo, v_hi))
     return speed, omega, gamma
+
+
+# ---------------------------------------------------------------------------
+# Three intercept laws, compared in Step 1.5
+# ---------------------------------------------------------------------------
+LAWS = ("pure", "lead", "pn")
+
+
+def pure_pursuit_velocity(p, p_t, speed):
+    """Pure pursuit: always fly straight at where the target is NOW."""
+    d = np.asarray(p_t, dtype=float) - np.asarray(p, dtype=float)
+    n = np.linalg.norm(d)
+    return speed * d / n if n > 1e-9 else np.zeros(2)
+
+
+def los_rate_and_closing_speed(p, vel, p_t, v_t):
+    """Line-of-sight (LOS) geometry between drone and target.
+
+    LOS = the straight line from the drone to the target.
+    Returns (lam_dot, closing_speed)
+        lam_dot        how fast that line is rotating [rad/s]
+        closing_speed  how fast the range is shrinking [m/s] (negative = opening)
+    """
+    r = np.asarray(p_t, dtype=float) - np.asarray(p, dtype=float)
+    v_rel = np.asarray(v_t, dtype=float) - np.asarray(vel, dtype=float)
+    r2 = max(r @ r, 1e-9)
+    lam_dot = (r[0] * v_rel[1] - r[1] * v_rel[0]) / r2
+    closing = -(r @ v_rel) / np.sqrt(r2)
+    return lam_dot, closing
+
+
+def guidance_command(law, state, speed, p_t, v_t, dt, k_gamma, pn_gain=3.0):
+    """Turn-rate command for the interceptor under the chosen law. Returns (speed, omega).
+
+    pure  aim at the target's current position
+    lead  aim at the predicted meeting point (assumes the target keeps its velocity)
+    pn    proportional navigation: turn at N times the LOS rotation rate. If the LOS
+          stops rotating, drone and target are on a collision course. While the drone
+          is not yet closing on the target, lead pursuit is used to turn it round.
+    """
+    if law not in LAWS:
+        raise ValueError(f"unknown guidance law '{law}', choose one of {LAWS}")
+    p, theta = np.asarray(state[:2], dtype=float), state[2]
+    vel = speed * np.array([np.cos(theta), np.sin(theta)])
+    p_next = p + vel * dt
+    p_t_next = np.asarray(p_t, dtype=float) + np.asarray(v_t, dtype=float) * dt
+
+    if law == "pn":
+        lam_dot, closing = los_rate_and_closing_speed(p, vel, p_t, v_t)
+        if closing > 0.2 * speed:
+            return speed, pn_gain * lam_dot
+        law = "lead"                                   # not closing yet: turn toward the meeting point first
+
+    if law == "pure":
+        u, u_next = pure_pursuit_velocity(p, p_t, speed), pure_pursuit_velocity(p_next, p_t_next, speed)
+    else:
+        u, _, _ = pursuit_velocity(p, p_t, v_t, speed)
+        u_next, _, _ = pursuit_velocity(p_next, p_t_next, v_t, speed)
+    v, omega, _ = follow_velocity(theta, u, u_next, dt, k_gamma, speed, speed)
+    return v, omega

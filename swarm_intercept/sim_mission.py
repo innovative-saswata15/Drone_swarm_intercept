@@ -6,7 +6,7 @@ from swarm_intercept.core.estimator import TargetKF
 from swarm_intercept.control.gvf import desired_heading
 from swarm_intercept.control.heading import heading_control
 from swarm_intercept.control.formation import phase_angles, spacing_speeds
-from swarm_intercept.control.guidance import pursuit_velocity, orbit_velocity, follow_velocity
+from swarm_intercept.control.guidance import orbit_velocity, follow_velocity, guidance_command
 from swarm_intercept.mission.fsm import MissionFSM, SURVEIL, INTERCEPT, INVESTIGATE, RETURN
 from swarm_intercept.sim_track import make_target, DEFAULT_STARTS
 
@@ -23,17 +23,16 @@ def drone_command(j, states, speeds, mode, kf, cfg, blocked=False):
         vel_now = velocity(states[j], speeds[j])
         p_next, p_t_next = p + vel_now * dt, p_t + v_t * dt
         if mode == INTERCEPT:
-            u, _, _ = pursuit_velocity(p, p_t, v_t, ms["intercept_speed"])
-            u_next, _, _ = pursuit_velocity(p_next, p_t_next, v_t, ms["intercept_speed"])
-            e = np.linalg.norm(p - p_t)
-            v_lo = v_hi = ms["intercept_speed"]
+            v, omega = guidance_command(ms.get("guidance", "lead"), states[j], ms["intercept_speed"], p_t, v_t,
+                                        dt, f["k_heading"], ms.get("pn_gain", 3.0))
+            return v, omega, np.linalg.norm(p - p_t)
         else:
             u, e = orbit_velocity(p, p_t, v_t, ms["orbit_radius"], f["k_gvf"], ms["orbit_speed"], f["direction"])
             u_next, _ = orbit_velocity(p_next, p_t_next, v_t, ms["orbit_radius"], f["k_gvf"],
                                        ms["orbit_speed"], f["direction"])
             v_lo, v_hi = 0.25 * ms["orbit_speed"], ms["intercept_speed"]
-        v, omega, _ = follow_velocity(theta, u, u_next, dt, f["k_heading"], v_lo, v_hi)
-        return v, omega, e
+            v, omega, _ = follow_velocity(theta, u, u_next, dt, f["k_heading"], v_lo, v_hi)
+            return v, omega, e
 
     # SURVEIL and RETURN both follow the formation circle. A returning drone is not yet part of the
     # spacing law; if it arrives right above a formation drone it slows down to let that drone pull ahead.

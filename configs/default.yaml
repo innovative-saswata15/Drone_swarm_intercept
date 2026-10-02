@@ -30,8 +30,6 @@ target:
   start: [-1.7, -1.0]   # where the target enters [m]
   heading_deg: 25.0     # its initial direction of travel
   enter_time: 30.0      # in the mission simulation the target appears after this long [s]
-  evade_speed_rel: 0.9  # 'evasive' pattern only: speed while running away, as a fraction of drone.v
-  evade_radius: 0.9     # 'evasive' pattern only: it starts running when a drone is closer than this [m]
 
 sensor:                 # virtual downward-looking sensor carried by every drone
   fov_radius: 0.6       # the target is seen only within this horizontal distance of a drone [m]
@@ -48,14 +46,10 @@ estimator:
   sigma_accel: 0.2      # how hard the target is assumed to manoeuvre [m/s^2] (process noise)
   lost_after: 5.0       # the track is declared lost after this long without a measurement [s]
 
-intercept:
-  speed_rel: 1.25       # interceptor speed as a fraction of drone.v (must be faster than the target)
-  capture_radius: 0.25  # the target counts as intercepted within this horizontal distance [m]
-  confirm_time: 1.0     # a track must be this old before a drone is sent [s]
-  guidance: lead        # lead = aim at the predicted meeting point, pure = aim at the target's current position
-
 mission:
   intercept_speed_rel: 1.375  # the interceptor flies at this multiple of drone.v while chasing
+  guidance: pure              # intercept law: pure (aim at the target), lead (aim ahead), pn (proportional navigation)
+  pn_gain: 3.0                # navigation constant N for the pn law
   orbit_radius: 0.4           # radius of the 'investigation' circle around the target [m]
   orbit_speed_rel: 0.75       # speed around that circle, as a multiple of drone.v
   capture_margin: 0.1         # 'intercepted' = within orbit_radius + capture_margin of the estimate [m]

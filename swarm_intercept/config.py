@@ -12,7 +12,6 @@ def load_config(path=None):
 
     Adds these derived values:
       formation.k_spacing, formation.v_min, formation.v_max   (absolute, from the *_rel entries)
-      intercept.speed, target.speed                           (absolute, from the *_rel entries)
       sim.time_scale   how much slower/faster this setup is than the reference one
                        (scripts multiply their run times by it)
       target.speed, mission.intercept_speed, mission.orbit_speed, mission.capture_radius
@@ -33,10 +32,6 @@ def load_config(path=None):
         ms["intercept_speed"] = ms["intercept_speed_rel"] * v
         ms["orbit_speed"] = ms["orbit_speed_rel"] * v
         ms["capture_radius"] = ms["orbit_radius"] + ms["capture_margin"]
-    if "intercept" in cfg:
-        cfg["intercept"]["speed"] = cfg["intercept"]["speed_rel"] * v
-    if "target" in cfg:
-        cfg["target"]["speed"] = cfg["target"]["speed_rel"] * v
     check_config(cfg)
     return cfg
 
@@ -59,12 +54,6 @@ def check_config(cfg):
     if fm["v_max"] / tightest > w_max:
         problems.append(f"the drone cannot turn tightly enough: v_max / radius = {fm['v_max'] / tightest:.2f} rad/s "
                         f"exceeds drone.omega_max = {w_max}. Lower the speed, enlarge the circle or raise omega_max.")
-    if "intercept" in cfg and "target" in cfg:
-        if cfg["intercept"]["speed_rel"] <= max(cfg["target"]["speed_rel"], cfg["target"]["evade_speed_rel"]):
-            problems.append("intercept.speed_rel must be larger than target.speed_rel, otherwise the target "
-                            "cannot be caught.")
-        if cfg["intercept"]["guidance"] not in ("lead", "pure"):
-            problems.append("intercept.guidance must be 'lead' or 'pure'.")
     if "mission" in cfg and "target" in cfg:
         ms, tspeed = cfg["mission"], cfg["target"]["speed"]
         if tspeed >= 0.8 * ms["intercept_speed"]:
