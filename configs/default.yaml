@@ -6,7 +6,7 @@ sim:
   seed: 7           # random seed, so every run is repeatable
 
 drone:
-  v: 0.1            # cruise speed [m/s]
+  v: 0.4            # cruise speed [m/s]
   omega_max: 1.5    # maximum turn rate [rad/s]
 
 arena:
