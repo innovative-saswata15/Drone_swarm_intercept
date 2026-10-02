@@ -1,0 +1,19 @@
+# All numbers for the project live here. SI units: metres, seconds, radians.
+sim:
+  dt: 0.02          # control period (50 Hz)
+  T: 40.0           # length of one simulation run [s]
+  seed: 7           # random seed, so every run is repeatable
+
+drone:
+  v: 0.4            # cruise speed [m/s]
+  omega_max: 1.5    # maximum turn rate [rad/s]
+
+arena:
+  center: [0.0, 0.0]
+  half_size: 2.0    # arena is 4 m x 4 m
+
+formation:
+  radius: 1.2       # formation circle radius [m]
+  k_gvf: 1.5        # GVF convergence gain [1/m]
+  k_heading: 3.0    # heading loop gain [1/s]
+  direction: 1      # +1 = counter-clockwise, -1 = clockwise
