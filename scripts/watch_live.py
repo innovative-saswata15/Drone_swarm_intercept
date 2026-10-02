@@ -19,11 +19,12 @@ cfg = load_config()
 R = cfg["formation"]["radius"]
 half = cfg["arena"]["half_size"]
 dt = cfg["sim"]["dt"]
+TS = cfg["sim"]["time_scale"]          # run lengths and playback speed scale with R/v
 COLORS = ["tab:blue", "tab:orange", "tab:green"]
 
 if mode == "single":
     from swarm_intercept.sim_single import simulate_single
-    lg1 = simulate_single([1.9, 0.0, 0.0], cfg, T=40.0)
+    lg1 = simulate_single([1.9, 0.0, 0.0], cfg, T=40.0 * TS)
     t = lg1["t"]
     X, Y, TH = lg1["x"][:, None], lg1["y"][:, None], lg1["theta"][:, None]
     active = np.ones_like(X, dtype=bool)
@@ -31,7 +32,7 @@ if mode == "single":
 else:
     from swarm_intercept.sim_multi import simulate_formation
     starts = np.array([[1.9, 0.0, 2.0], [1.5, 1.0, -1.0], [0.3, -0.2, 0.5]])
-    lg = simulate_formation(starts, cfg, leave=(2, 50.0, 100.0), T=150.0)
+    lg = simulate_formation(starts, cfg, leave=(2, 50.0 * TS, 100.0 * TS), T=150.0 * TS)
     t, X, Y, TH, active = lg["t"], lg["x"], lg["y"], lg["theta"], lg["active"]
 
     def info(i):
@@ -40,7 +41,7 @@ else:
 
 N = X.shape[1]
 FPS = 25
-step = max(1, int(round(speedup / (FPS * dt))))      # simulation steps per frame
+step = max(1, int(round(speedup * TS / (FPS * dt))))  # simulation steps per frame
 
 fig, ax = plt.subplots(figsize=(7, 7))
 ang = np.linspace(0, 2 * np.pi, 400)
@@ -56,7 +57,7 @@ title = ax.set_title("")
 
 def draw(frame):
     i = min(frame * step, len(t) - 1)
-    lo = max(0, i - int(8.0 / dt))                    # tail = last 8 seconds
+    lo = max(0, i - int(8.0 * TS / dt))               # tail
     for j in range(N):
         x, y, th = X[i, j], Y[i, j], TH[i, j]
         dots[j].set_data([x], [y])

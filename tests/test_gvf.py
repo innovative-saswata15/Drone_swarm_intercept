@@ -1,11 +1,12 @@
 """Tests for Step 1.1. Run with:  pytest -q"""
+from pathlib import Path
 import numpy as np
 from swarm_intercept.config import load_config
 from swarm_intercept.utils.angles import wrap
 from swarm_intercept.control.gvf import circle_gvf
 from swarm_intercept.sim_single import simulate_single
 
-cfg = load_config()
+cfg = load_config(Path(__file__).parent / "reference_config.yaml")   # frozen numbers, independent of configs/default.yaml
 R = cfg["formation"]["radius"]
 v = cfg["drone"]["v"]
 
