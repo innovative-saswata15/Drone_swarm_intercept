@@ -57,104 +57,183 @@ def rejoin_block(j, states, mode, phis, fsm, cfg):
     return 1 if lead > 0 else -1
 
 
-def simulate_mission(cfg, pattern="weave", seed=None, T=150.0, states0=None):
-    """Run the whole mission once. Returns (log, fsm)."""
-    dt = cfg["sim"]["dt"]
-    f, sc, ec, al = cfg["formation"], cfg["sensor"], cfg["estimator"], cfg["altitude"]
-    ts = cfg["sim"]["time_scale"]
-    omega_max = cfg["drone"]["omega_max"]
-    c = np.array(cfg["arena"]["center"], dtype=float)
-    rng = np.random.default_rng(cfg["sim"]["seed"] if seed is None else seed)
+class MissionSim:
+    """The classical mission as a step-by-step simulator (one call = one control period of cfg.sim.dt).
 
-    states = np.array(DEFAULT_STARTS if states0 is None else states0, dtype=float)
-    N = len(states)
-    z = np.full(N, al["formation"])
-    target = make_target(cfg, pattern, rng)
-    kf = TargetKF(sc["sigma"], ec["sigma_accel"])
-    fsm = MissionFSM(N, cfg)
-    every = max(1, int(round(1.0 / (sc["rate_hz"] * dt))))
-    ar = sc["area"]
-    every_area = max(1, int(round(1.0 / (ar["rate_hz"] * dt))))
-    speeds_prev = np.full(N, cfg["drone"]["v"])
-    ms = cfg["mission"]
-    last_cmd = np.column_stack([speeds_prev, np.zeros(N)])      # (v, omega) each drone applied last step
+    A step has two halves, so that a learning agent can look at the situation BEFORE it acts:
 
-    n = int(round(T / dt))
-    log = {"t": np.arange(n) * dt}
-    for key in ("x", "y", "theta", "z", "v", "omega", "e", "gap"):
-        log[key] = np.zeros((n, N))
-    log["filtered"] = np.zeros((n, N), dtype=bool)
-    log.update({"mode": np.zeros((n, N), dtype=int), "target": np.zeros((n, 4)),
-                "est": np.full((n, 4), np.nan), "tracked": np.zeros(n, dtype=bool),
-                "in_view": np.zeros(n, dtype=bool), "min_sep": np.zeros(n), "min_sep_xy": np.zeros(n),
-                "dist_true": np.full(n, np.nan), "present": np.zeros(n, dtype=bool)})
+        begin()           sense -> estimate -> decide (state machine) -> classical (nominal) command
+        apply(residual)   add an optional residual to the nominal command -> safety filter -> fly one step
 
-    t_enter = cfg["target"]["enter_time"] * ts
-    for i in range(n):
+    step(residual) = begin() + apply(residual). With residual=None (or zeros) the result is
+    identical to the purely classical controller; simulate_mission() below is exactly that.
+
+    residual   array (N, 2): extra (speed [m/s], turn rate [rad/s]) added to the nominal command of
+               each drone BEFORE the safety filter, which therefore still has the last word.
+    """
+
+    def __init__(self, cfg, pattern="weave", seed=None, T=150.0, states0=None, record=False, t_enter=None):
+        self.cfg = cfg
+        self.dt = dt = cfg["sim"]["dt"]
+        f, sc, ec, al = cfg["formation"], cfg["sensor"], cfg["estimator"], cfg["altitude"]
+        self.ts = cfg["sim"]["time_scale"]
+        self.c = np.array(cfg["arena"]["center"], dtype=float)
+        self.rng = np.random.default_rng(cfg["sim"]["seed"] if seed is None else seed)
+        self.states = np.array(DEFAULT_STARTS if states0 is None else states0, dtype=float)
+        self.N = N = len(self.states)
+        self.z = np.full(N, al["formation"])
+        self.target = make_target(cfg, pattern, self.rng)
+        self.kf = TargetKF(sc["sigma"], ec["sigma_accel"])
+        self.fsm = MissionFSM(N, cfg)
+        self.every = max(1, int(round(1.0 / (sc["rate_hz"] * dt))))
+        self.every_area = max(1, int(round(1.0 / (sc["area"]["rate_hz"] * dt))))
+        self.speeds_prev = np.full(N, cfg["drone"]["v"])
+        self.last_cmd = np.column_stack([self.speeds_prev, np.zeros(N)])    # (v, omega) applied last step
+        self.t_enter = cfg["target"]["enter_time"] * self.ts if t_enter is None else t_enter
+        self.i = 0                                  # step counter
+        self.T = T
+        self._begun = False
+        # filled by begin()
+        self.mode = self.fsm.state.copy()
+        self.nominal = np.zeros((N, 3))             # nominal (v, omega, e) of every drone
+        self.phis = np.zeros(N)
+        self.speeds = self.speeds_prev.copy()
+        self.gap = np.zeros(N)
+        self.present = False
+        self.in_view = False
+        self.d_true = np.zeros(N)                   # true drone-target distances (for logging / rewards only)
+        # filled by apply()
+        self.applied = self.last_cmd.copy()
+        self.filtered = np.zeros(N, dtype=bool)
+        self.min_sep_xy = np.inf
+
+        self.log = None
+        if record:
+            n = int(round(T / dt))
+            log = {"t": np.arange(n) * dt}
+            for key in ("x", "y", "theta", "z", "v", "omega", "e", "gap"):
+                log[key] = np.zeros((n, N))
+            log["filtered"] = np.zeros((n, N), dtype=bool)
+            log.update({"mode": np.zeros((n, N), dtype=int), "target": np.zeros((n, 4)),
+                        "est": np.full((n, 4), np.nan), "tracked": np.zeros(n, dtype=bool),
+                        "in_view": np.zeros(n, dtype=bool), "min_sep": np.zeros(n), "min_sep_xy": np.zeros(n),
+                        "dist_true": np.full(n, np.nan), "present": np.zeros(n, dtype=bool)})
+            self.log = log
+
+    @property
+    def t(self):
+        return self.i * self.dt
+
+    def begin(self):
+        """Sense, estimate, decide, and compute the nominal command of every drone (idempotent until apply())."""
+        if self._begun:
+            return
+        cfg, dt, i, L = self.cfg, self.dt, self.i, self.log
+        f, sc, ec = cfg["formation"], cfg["sensor"], cfg["estimator"]
+        ar = sc["area"]
+        states, kf, fsm, rng, N = self.states, self.kf, self.fsm, self.rng, self.N
         t = i * dt
-        present = t >= t_enter                  # before this the target is not in the arena
-        truth = target.state
-        log["target"][i] = truth if present else np.nan
-        log["present"][i] = present
-        log["x"][i], log["y"][i], log["theta"][i], log["z"][i] = states[:, 0], states[:, 1], states[:, 2], z
+        present = t >= self.t_enter                 # before this the target is not in the arena
+        truth = self.target.state
+        self.present = present
+        if L is not None:
+            L["target"][i] = truth if present else np.nan
+            L["present"][i] = present
+            L["x"][i], L["y"][i], L["theta"][i], L["z"][i] = states[:, 0], states[:, 1], states[:, 2], self.z
 
         # --- sense and estimate ---
         kf.predict(dt)
         d = np.linalg.norm(states[:, :2] - truth[:2], axis=1)
-        log["in_view"][i] = present and np.any(d <= sc["fov_radius"])
-        if present and i % every_area == 0:     # wide-area, coarse
-            meas = area_measurement(truth[:2], ar["half_size"], ar["sigma"], ar["p_dropout"], rng, c)
+        self.d_true = d
+        self.in_view = bool(present and np.any(d <= sc["fov_radius"]))
+        if L is not None:
+            L["in_view"][i] = self.in_view
+        if present and i % self.every_area == 0:    # wide-area, coarse
+            meas = area_measurement(truth[:2], ar["half_size"], ar["sigma"], ar["p_dropout"], rng, self.c)
             if meas is not None:
                 kf.update(meas, sigma=ar["sigma"])
-        if present and i % every == 0:          # close-range, accurate (only near a drone)
+        if present and i % self.every == 0:         # close-range, accurate (only near a drone)
             meas, _ = target_measurement(truth[:2], states[:, :2], sc["fov_radius"], sc["sigma"], sc["p_dropout"], rng)
             if meas is not None:
                 kf.update(meas)
-        if kf.has_track and kf.time_since_update > ec["lost_after"] * ts:
+        if kf.has_track and kf.time_since_update > ec["lost_after"] * self.ts:
             kf.drop()
-        if kf.has_track:
-            log["est"][i], log["tracked"][i] = kf.x, True
+        if kf.has_track and L is not None:
+            L["est"][i], L["tracked"][i] = kf.x, True
 
         # --- decide ---
         fsm.update(t, states, kf)
-        mode = fsm.state.copy()
-        log["mode"][i] = mode
-        if fsm.interceptor is not None:
-            log["dist_true"][i] = d[fsm.interceptor]
+        self.mode = mode = fsm.state.copy()
+        if L is not None:
+            L["mode"][i] = mode
+            if fsm.interceptor is not None:
+                L["dist_true"][i] = d[fsm.interceptor]
 
-        # --- act ---
+        # --- nominal (classical) command ---
         in_formation = mode == SURVEIL
-        phis = phase_angles(states[:, :2], c)
-        speeds, gap = spacing_speeds(phis, in_formation, cfg["drone"]["v"], f["k_spacing"],
-                                     f["v_min"], f["v_max"], f["direction"])
-        cmd = [drone_command(j, states, speeds_prev if mode[j] in (INTERCEPT, INVESTIGATE) else speeds,
-                             mode[j], kf, cfg, blocked=rejoin_block(j, states, mode, phis, fsm, cfg))
-               for j in range(N)]
+        self.phis = phis = phase_angles(states[:, :2], self.c)
+        self.speeds, self.gap = spacing_speeds(phis, in_formation, cfg["drone"]["v"], f["k_spacing"],
+                                               f["v_min"], f["v_max"], f["direction"])
+        self.nominal = np.array([
+            drone_command(j, states, self.speeds_prev if mode[j] in (INTERCEPT, INVESTIGATE) else self.speeds,
+                          mode[j], kf, cfg, blocked=rejoin_block(j, states, mode, phis, fsm, cfg))
+            for j in range(N)])
+        self._begun = True
+
+    def apply(self, residual=None):
+        """Add the residual to the nominal command, run the safety filter and advance every drone by one step."""
+        if not self._begun:
+            raise RuntimeError("call begin() before apply()")
+        cfg, dt, i, L = self.cfg, self.dt, self.i, self.log
+        f, al, ms = cfg["formation"], cfg["altitude"], cfg["mission"]
+        omega_max = cfg["drone"]["omega_max"]
+        states, mode, N = self.states, self.mode, self.N
+        res = None if residual is None else np.asarray(residual, dtype=float)
+
         # --- safety filter: every drone checks its command against the others ---
         applied = np.zeros((N, 2))
         for j in range(N):
-            v, omega, e = cmd[j]
+            v, omega, e = self.nominal[j]
+            if res is not None:
+                v, omega = v + res[j, 0], omega + res[j, 1]
             omega = float(np.clip(omega, -omega_max, omega_max))
             v_hi = max(f["v_max"], ms["intercept_speed"])
-            v, omega, changed = safety_filter(j, states, last_cmd, v, omega, cfg, v_hi,
+            v, omega, changed = safety_filter(j, states, self.last_cmd, v, omega, cfg, v_hi,
                                               priority=(mode != SURVEIL))     # formation drones have right of way
             applied[j] = v, omega
-            log["v"][i, j], log["omega"][i, j], log["e"][i, j], log["filtered"][i, j] = v, omega, e, changed
+            self.filtered[j] = changed
+            if L is not None:
+                L["v"][i, j], L["omega"][i, j], L["e"][i, j], L["filtered"][i, j] = v, omega, e, changed
         for j in range(N):
             v, omega = applied[j]
             states[j] = unicycle_step(states[j], v, omega, dt, omega_max)
-            speeds_prev[j] = v
-        last_cmd = applied
+            self.speeds_prev[j] = v
+        self.last_cmd = applied
+        self.applied = applied
         for j in range(N):
             z_goal = al["formation"] if mode[j] == SURVEIL else al["transit"]
-            z[j] += np.clip(z_goal - z[j], -al["climb_rate"] * dt, al["climb_rate"] * dt)
-        log["gap"][i] = gap
+            self.z[j] += np.clip(z_goal - self.z[j], -al["climb_rate"] * dt, al["climb_rate"] * dt)
 
-        pos3 = np.column_stack([states[:, :2], z])
         iu = np.triu_indices(N, 1)
-        log["min_sep"][i] = np.linalg.norm(pos3[:, None] - pos3[None], axis=2)[iu].min()
-        log["min_sep_xy"][i] = np.linalg.norm(states[:, None, :2] - states[None, :, :2], axis=2)[iu].min()
-        if present:
-            target.step(dt)
+        self.min_sep_xy = np.linalg.norm(states[:, None, :2] - states[None, :, :2], axis=2)[iu].min()
+        if L is not None:
+            L["gap"][i] = self.gap
+            pos3 = np.column_stack([states[:, :2], self.z])
+            L["min_sep"][i] = np.linalg.norm(pos3[:, None] - pos3[None], axis=2)[iu].min()
+            L["min_sep_xy"][i] = self.min_sep_xy
+        if self.present:
+            self.target.step(dt)
+        self.i += 1
+        self._begun = False
 
-    return log, fsm
+    def step(self, residual=None):
+        self.begin()
+        self.apply(residual)
+
+
+def simulate_mission(cfg, pattern="weave", seed=None, T=150.0, states0=None):
+    """Run the whole classical mission once. Returns (log, fsm)."""
+    sim = MissionSim(cfg, pattern, seed, T, states0, record=True)
+    for _ in range(int(round(T / cfg["sim"]["dt"]))):
+        sim.step()
+    return sim.log, sim.fsm

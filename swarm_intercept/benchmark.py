@@ -47,12 +47,12 @@ def make_case(cfg, pattern, quality, seed):
     return c, S
 
 
-def run_case(args):
-    """Fly one case and measure it. args = (cfg, pattern, quality, seed). Returns a dict (one table row)."""
-    cfg, pattern, quality, seed = args
-    c, S = make_case(cfg, pattern, quality, seed)
-    ts, dt = c["sim"]["time_scale"], c["sim"]["dt"]
-    lg, fsm = simulate_mission(c, pattern, seed=seed, T=90.0 * ts, states0=S)
+def case_metrics(c, lg, fsm, pattern, quality, seed):
+    """Measure one flown mission (log + state machine) and return one table row.
+
+    Shared by the classical benchmark and by the RL evaluation, so both are scored identically.
+    """
+    dt, ts = c["sim"]["dt"], c["sim"]["time_scale"]
     t, mode, ev = lg["t"], lg["mode"], fsm.events
     row = {"pattern": pattern, "quality": quality, "seed": seed}
     row.update({m: np.nan for m in METRICS})
@@ -82,6 +82,15 @@ def run_case(args):
         if ok.any():
             row["t_reform"] = t[i0 + int(np.argmax(ok))] - ev[-1][0]
     return row
+
+
+def run_case(args):
+    """Fly one case and measure it. args = (cfg, pattern, quality, seed). Returns a dict (one table row)."""
+    cfg, pattern, quality, seed = args
+    c, S = make_case(cfg, pattern, quality, seed)
+    ts = c["sim"]["time_scale"]
+    lg, fsm = simulate_mission(c, pattern, seed=seed, T=90.0 * ts, states0=S)
+    return case_metrics(c, lg, fsm, pattern, quality, seed)
 
 
 def run_benchmark(cfg, n_per_cell=25, patterns=PATTERNS, qualities=tuple(QUALITIES), workers=None):

@@ -1,0 +1,19 @@
+# Residual-RL settings. Kept separate from default.yaml so the classical numbers never change by accident.
+rl:
+  active_modes: [intercept, investigate, return]   # the agent steers the drone that is on the mission, in these states
+  action_repeat: 5          # one RL decision lasts this many control steps (5 x 0.02 s = 10 Hz)
+  max_dv_rel: 0.3           # largest speed residual, as a fraction of drone.v
+  max_domega: 0.75          # largest turn-rate residual [rad/s]
+  episode_time_rel: 60.0    # training episode length, multiplied by sim.time_scale [s]
+  train_enter_time_rel: 1.0 # training: the target enters this long after the start (drones start in formation)
+  reward:
+    time: 1.0               # per second spent in INTERCEPT or RETURN (the phases the agent can speed up)
+    progress: 6.0           # per metre of range closed to the target (INTERCEPT)
+    view: 1.0               # per second the target is inside the downward field of view (INVESTIGATE)
+    orbit: 1.0              # per second per metre of distance error from the orbit circle (INVESTIGATE)
+    return_progress: 3.0    # per metre closer to the formation circle (RETURN)
+    effort: 0.02            # per rad^2/s of applied turn rate (matches the 'effort' benchmark metric)
+    filter: 0.5             # per second the safety filter had to change the command
+    separation: 5.0         # per metre of horizontal clearance below d_safe + sep_soft, per second
+    sep_soft: 0.1           # soft margin on top of d_safe [m]
+    done: 20.0              # bonus for finishing the whole mission (investigated and rejoined)
