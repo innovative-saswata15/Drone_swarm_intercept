@@ -22,7 +22,9 @@ from matplotlib.animation import FuncAnimation, PillowWriter
 
 from swarm_intercept.config import load_config
 from swarm_intercept.rl.evaluate import fly_case
-from swarm_intercept.mission.fsm import STATE_NAMES, SURVEIL
+from swarm_intercept.mission.fsm import STATE_NAMES, SURVEIL, INVESTIGATE
+
+FADE = 0.0          # seconds the investigated target stays visible (0 = removed at once)
 
 COLORS = ["tab:blue", "tab:orange", "tab:green"]
 
@@ -49,6 +51,13 @@ class Panel:
         ax.legend(loc="upper right", fontsize=8)
         self.title = ax.set_title(name)
         self.tail_len = int(8.0 * case_cfg["sim"]["time_scale"] / case_cfg["sim"]["dt"])
+        # DISPLAY ONLY: after the investigation is complete the target is shown as 'investigated' and then
+        # removed from the picture. The simulated mission and every logged number are unchanged.
+        self.dt, self.ts = case_cfg["sim"]["dt"], case_cfg["sim"]["time_scale"]
+        done_t = [tt for tt, text in fsm.events if "investigation complete" in text]
+        self.i_done = int(round(done_t[0] / self.dt)) if done_t else None
+        self.inv_steps = case_cfg["mission"]["investigate_time"] * self.ts / self.dt
+        self.done_text = ax.text(0, 0, "", color="tab:green", fontsize=10, fontweight="bold", ha="center", va="bottom")
 
     def draw(self, i):
         lg = self.lg
@@ -64,16 +73,36 @@ class Panel:
             self.noses[j].set_data([x, x + 0.22 * np.cos(th)], [y, y + 0.22 * np.sin(th)])
             self.tails[j].set_data(lg["x"][lo:i + 1, j], lg["y"][lo:i + 1, j])
             self.discs[j].center = (x, y)
-        if lg["present"][i]:
-            self.true_dot.set_data([lg["target"][i, 0]], [lg["target"][i, 1]])
-        else:
-            self.true_dot.set_data([], [])
-        if lg["tracked"][i]:
-            self.est_dot.set_data([lg["est"][i, 0]], [lg["est"][i, 1]])
-        else:
+        d = self.i_done
+        fade = None if d is None or i < d else (1.0 - (i - d) * self.dt / (FADE * self.ts) if FADE > 0 else 0.0)
+        if fade is None:                                   # normal display
+            self.true_dot.set_color("tab:red"); self.true_dot.set_alpha(1.0); self.done_text.set_text("")
+            if lg["present"][i]:
+                self.true_dot.set_data([lg["target"][i, 0]], [lg["target"][i, 1]])
+            else:
+                self.true_dot.set_data([], [])
+            if lg["tracked"][i]:
+                self.est_dot.set_data([lg["est"][i, 0]], [lg["est"][i, 1]])
+            else:
+                self.est_dot.set_data([], [])
+        elif fade > 0:                                     # just investigated: green, labelled, fading out
+            tx, ty = lg["target"][d, 0], lg["target"][d, 1]
+            self.true_dot.set_data([tx], [ty]); self.true_dot.set_color("tab:green"); self.true_dot.set_alpha(fade)
+            self.done_text.set_position((tx, ty + 0.15)); self.done_text.set_text("INVESTIGATED")
+            self.done_text.set_alpha(fade)
             self.est_dot.set_data([], [])
-        busy = [f"drone {j + 1}: {STATE_NAMES[mode[j]]}" for j in range(self.N) if mode[j] != SURVEIL]
-        state = busy[0] if busy else ("target detected" if lg["tracked"][i] else "all in formation")
+        else:                                              # gone from the display
+            self.true_dot.set_data([], []); self.est_dot.set_data([], []); self.done_text.set_text("")
+        after = d is not None and i >= d
+        busy = []
+        for j in range(self.N):
+            if mode[j] == INVESTIGATE:
+                k = int((lg["mode"][:i + 1, j] == INVESTIGATE).sum())
+                busy.append(f"drone {j + 1}: INVESTIGATE {min(100, round(100 * k / self.inv_steps)):3d}%")
+            elif mode[j] != SURVEIL:
+                busy.append(f"drone {j + 1}: {STATE_NAMES[mode[j]]}" + (" (target investigated)" if after else ""))
+        state = busy[0] if busy else ("mission complete" if after else
+                                      ("target detected" if lg["tracked"][i] else "all in formation"))
         self.title.set_text(f"{self.name}   t = {lg['t'][i]:5.1f} s   {state}")
 
 
@@ -89,6 +118,7 @@ def main():
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--speed", type=float, default=None)
     ap.add_argument("--save", default=None, help="write a .gif instead of opening a window")
+    ap.add_argument("--dpi", type=int, default=55, help="resolution of the saved .gif (55 = small file, 90 = sharper)")
     a = ap.parse_args()
     if a.classical and a.model is not None:      # '--classical weave 3' : shift the positionals
         a.speed_pos, a.seed_pos, a.pattern_pos, a.model = a.seed_pos, a.pattern_pos, a.model, None
@@ -127,7 +157,7 @@ def main():
     anim = FuncAnimation(fig, draw, frames=n // step, interval=1000 / FPS, blit=False, repeat=True)
     if a.save:
         fig.set_size_inches(6.5 * len(runs), 6.5)
-        anim.save(a.save, writer=PillowWriter(fps=FPS), dpi=55)
+        anim.save(a.save, writer=PillowWriter(fps=FPS), dpi=a.dpi)
         print(f"saved {a.save}")
     else:
         plt.show()

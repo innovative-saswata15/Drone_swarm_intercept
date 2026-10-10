@@ -29,6 +29,8 @@ dt = cfg["sim"]["dt"]
 TS = cfg["sim"]["time_scale"]          # run lengths and playback speed scale with R/v
 COLORS = ["tab:blue", "tab:orange", "tab:green"]
 trk = None                              # tracking log, only in 'track' mode
+i_done = None                           # mission mode: step at which the investigation was completed
+FADE = 0.0                              # seconds the investigated target stays visible (0 = removed at once)
 
 if mode == "single":
     from swarm_intercept.sim_single import simulate_single
@@ -56,10 +58,26 @@ elif mode == "mission":
     t, X, Y, TH = trk["t"], trk["x"], trk["y"], trk["theta"]
     active = trk["mode"] == SURVEIL
     trk["target"] = np.where(trk["present"][:, None], trk["target"], np.nan)
+    # DISPLAY ONLY: once the investigation is complete the target is drawn as 'investigated' and then
+    # removed from the picture. The simulation itself is untouched (the target keeps moving and all
+    # logged numbers are the same); this only makes the end of the task visible to someone watching.
+    done_t = [tt for tt, text in fsm.events if "investigation complete" in text]
+    i_done = int(round(done_t[0] / dt)) if done_t else None
+    INVESTIGATE = STATE_NAMES.index("INVESTIGATE")
+    inv_steps = cfg["mission"]["investigate_time"] * TS / dt
 
     def info(i):
-        busy = [f"drone {j + 1}: {STATE_NAMES[trk['mode'][i, j]]}" for j in range(X.shape[1]) if not active[i, j]]
-        return busy[0] if busy else ("target detected" if trk["tracked"][i] else "all in formation")
+        busy = [(j, trk["mode"][i, j]) for j in range(X.shape[1]) if not active[i, j]]
+        if busy:
+            j, m = busy[0]
+            if m == INVESTIGATE:
+                k = int((trk["mode"][:i + 1, j] == INVESTIGATE).sum())
+                return f"drone {j + 1}: INVESTIGATE  {min(100, round(100 * k / inv_steps)):3d}%"
+            tail = "   (target investigated)" if (i_done is not None and i >= i_done) else ""
+            return f"drone {j + 1}: {STATE_NAMES[m]}{tail}"
+        if i_done is not None and i >= i_done:
+            return "mission complete: target investigated, formation restored"
+        return "target detected" if trk["tracked"][i] else "all in formation"
 else:
     from swarm_intercept.sim_multi import simulate_formation
     starts = np.array([[1.9, 0.0, 2.0], [1.5, 1.0, -1.0], [0.3, -0.2, 0.5]])
@@ -91,6 +109,7 @@ if trk is not None:
         ax.add_patch(d)
     true_dot, = ax.plot([], [], "X", color="tab:red", ms=12, label="target (truth)")
     est_dot, = ax.plot([], [], "+", color="tab:purple", ms=15, mew=2.5, label="Kalman estimate")
+    done_text = ax.text(0, 0, "", color="tab:green", fontsize=10, fontweight="bold", ha="center", va="bottom")
     ax.legend(loc="upper right", fontsize=8)
 
 
@@ -108,11 +127,21 @@ def draw(frame):
     if trk is not None:
         for j in range(N):
             discs[j].center = (X[i, j], Y[i, j])
-        true_dot.set_data([trk["target"][i, 0]], [trk["target"][i, 1]])
-        if trk["tracked"][i]:
-            est_dot.set_data([trk["est"][i, 0]], [trk["est"][i, 1]])
-        else:
+        fade = None if i_done is None or i < i_done else (1.0 - (i - i_done) * dt / (FADE * TS) if FADE > 0 else 0.0)
+        if fade is None:                                   # normal display
+            true_dot.set_color("tab:red"); true_dot.set_alpha(1.0); done_text.set_text("")
+            true_dot.set_data([trk["target"][i, 0]], [trk["target"][i, 1]])
+            if trk["tracked"][i]:
+                est_dot.set_data([trk["est"][i, 0]], [trk["est"][i, 1]])
+            else:
+                est_dot.set_data([], [])
+        elif fade > 0:                                     # just investigated: green, labelled, fading out
+            tx, ty = trk["target"][i_done, 0], trk["target"][i_done, 1]
+            true_dot.set_data([tx], [ty]); true_dot.set_color("tab:green"); true_dot.set_alpha(fade)
+            done_text.set_position((tx, ty + 0.15)); done_text.set_text("INVESTIGATED"); done_text.set_alpha(fade)
             est_dot.set_data([], [])
+        else:                                              # gone from the display
+            true_dot.set_data([], []); est_dot.set_data([], []); done_text.set_text("")
     title.set_text(f"t = {t[i]:6.1f} s     {info(i)}")
     return dots + noses + tails + [title]
 
